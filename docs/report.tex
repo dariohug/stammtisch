@@ -1,0 +1,246 @@
+\documentclass[10pt,a4paper]{article}
+\usepackage[margin=2.1cm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern,microtype,booktabs,array,tabularx,enumitem,xcolor}
+\usepackage{tikz,pgfplots,pgfplotstable}
+\usepackage[hidelinks]{hyperref}
+\usepackage{fancyvrb,fontspec}
+\IfFontExistsTF{DejaVu Sans Mono}{\newfontfamily\dashfont{DejaVu Sans Mono}[NFSSFamily=dashmono]\def\dashfam{dashmono}}{\def\dashfam{tt}}
+\usetikzlibrary{arrows.meta,positioning,shapes.symbols,calc,fit}
+\pgfplotsset{compat=1.18}
+\setlist{nosep,leftmargin=1.2em}
+\setlength{\parindent}{0pt}\setlength{\parskip}{4pt}
+
+\definecolor{done}{HTML}{2E7D32}\definecolor{next}{HTML}{1565C0}
+\definecolor{todo}{HTML}{9E9E9E}\definecolor{accent}{HTML}{C62828}
+\newcommand{\status}[1]{\textcolor{#1}{\rule{0.6em}{0.6em}}}
+
+\input{data/numbers.tex}
+\input{data/bench.tex}
+
+\title{\textbf{Stammtisch} --- an AI for Schieber Jass\\[2pt]\large Progress log}
+\author{Dario Hug}
+\date{last update: 2026-09-26}
+
+\begin{document}
+\maketitle
+\vspace{-1.5em}
+
+\section*{At a glance}
+\begin{tabularx}{\textwidth}{@{}l>{\raggedright\arraybackslash}X@{}}
+Goal & A Schieber agent that beats strong human players in duplicate matches. \\
+State of the art & Strong-amateur level; no superhuman result published (HSLU, Uni Bern, ETH). \\
+Data & \NGames{} human Swisslos games (\DateFrom{} -- \DateTo), \NPlayers{} players, \NCards{} card plays. \\
+Engine & C++ bitboards, \PeakRandom{} rounds/s on a ThinkPad (\Cores{} threads), replays all human games. \\
+Current phase & \status{done} P0 done \quad \status{next} P1 next \\
+\end{tabularx}
+
+%------------------------------------------------------------------------------
+\section{Plan}
+The approach follows what worked for imperfect-information games at scale
+(Pluribus/ReBeL for poker, DeepNash for Stratego, NooK for Bridge):
+imitate humans first, then improve by self-play, and add search over hidden cards at play time.
+
+\begin{center}
+\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[
+  ph/.style={signal, signal to=east, signal from=west, draw=white, thick, minimum height=1.05cm,
+             minimum width=2.15cm, text width=1.75cm, align=center, font=\scriptsize\sffamily, text=white},
+  node distance=-0.18cm]
+\node[ph, fill=done, signal from=nowhere] (p0) {\textbf{P0}\\Engine \& data};
+\node[ph, fill=next, right=of p0] (p1) {\textbf{P1}\\Arena, Weis, splits};
+\node[ph, fill=todo, right=of p1] (p2) {\textbf{P2}\\Search baseline};
+\node[ph, fill=todo, right=of p2] (p3) {\textbf{P3}\\Imitation};
+\node[ph, fill=todo, right=of p3] (p4) {\textbf{P4}\\Belief model};
+\node[ph, fill=todo, right=of p4] (p5) {\textbf{P5}\\Self-play RL};
+\node[ph, fill=todo, right=of p5] (p6) {\textbf{P6}\\Search + nets};
+\node[ph, fill=todo, right=of p6] (p7) {\textbf{P7}\\vs.\ humans};
+\end{tikzpicture}}
+\end{center}
+
+\small
+\begin{tabular}{@{}l>{\raggedright}p{6.2cm}>{\raggedright\arraybackslash}p{7.2cm}@{}}
+\toprule
+ & Work & Exit criterion \\ \midrule
+P0 & Rules engine, simulator, monitoring, data ingest, validation & All human games replay; $>$1\,M rounds/s \hfill\status{done} \\
+P1 & Duplicate-deal arena + Elo; Weis/St\"ock and multipliers; train/val/test split by date and player; jass-server client & Arena reports significant differences at $\pm$1 point/round \\
+P2 & Determinized search (PIMC): sample hidden hands, solve each deal exactly with $\alpha\beta$ & Beats heuristic baseline clearly \\
+P3 & Transformer policy on human games (card play + trump/push head) & Top-1 human-move accuracy; beats P2 without search \\
+P4 & Network predicting who holds which card from the public history & Lower hand-prediction loss than uniform sampling; improves P2 \\
+P5 & Self-play (PPO / R-NaD), KL-regularized to the human policy, league of past versions & Beats P3 and P4; stays playable with human partners \\
+P6 & Test-time search with learned policy/value (IS-MCTS, ReBeL-style) & Best agent in arena \\
+P7 & Web UI, duplicate matches vs.\ strong players & Positive score over $\geq$ 1000 duplicate deals \\
+\bottomrule
+\end{tabular}
+\normalsize
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}[
+  box/.style={draw, rounded corners=2pt, minimum height=0.8cm, text width=2.3cm, align=center, font=\scriptsize\sffamily},
+  data/.style={box, fill=blue!7}, model/.style={box, fill=orange!12}, eng/.style={box, fill=green!10},
+  arr/.style={-{Stealth[length=2mm]}, thick}]
+\node[data]  (logs)   at (0,-0.75)  {Swisslos logs\\\NGames{} games};
+\node[model] (sl)     at (3.6,0)    {P3 imitation\\policy + trump};
+\node[model] (belief) at (3.6,-1.5) {P4 belief model\\who holds which card};
+\node[model] (rl)     at (7.2,0)    {P5 self-play RL};
+\node[model] (search) at (7.2,-1.5) {P2/P6 search over\\sampled hands};
+\node[box, fill=red!8] (eval) at (10.8,-0.75) {P1 arena\\duplicate deals, Elo};
+\draw[arr] (logs.east) -- (sl.west);
+\draw[arr] (logs.east) -- (belief.west);
+\draw[arr] (sl) -- (rl);
+\draw[arr] (belief) -- (search);
+\draw[arr] (rl) -- node[right, font=\tiny\sffamily] {policy, value} (search);
+\draw[arr] (rl.east) -- (eval.west);
+\draw[arr] (search.east) -- (eval.west);
+\node[eng, minimum height=0.55cm, text width=13.2cm] (engine) at (5.4,-2.7) {C++ engine: rules, simulator, VecEnv --- generates self-play data for every stage};
+\end{tikzpicture}
+\caption{How the parts fit together. The engine produces unlimited self-play data; human logs bootstrap the policy and the belief model.}
+\end{figure}
+
+\textbf{Compute.} The ThinkPad (\Cores{} threads, 30\,GB RAM, no CUDA GPU) covers P0--P4 with small networks.
+P5/P6 at full scale will likely need a rented GPU; the C++ \texttt{VecEnv} keeps simulation off the critical path.
+
+%------------------------------------------------------------------------------
+\section{Rules and encoding}
+Encoding matches HSLU \texttt{jass-kit} so data and agents are interchangeable. Seats play counter-clockwise
+($\mathrm{next}(p) = p+3 \bmod 4$), teams are $\{0,2\}$ and $\{1,3\}$. A hand is a 36-bit set in one \texttt{uint64}.
+
+\begin{center}
+\begin{tikzpicture}[x=0.72cm,y=0.5cm,font=\scriptsize\sffamily]
+\foreach \r [count=\i from 0] in {A,K,Q,J,10,9,8,7,6} \node at (\i+1,0.9) {\r};
+\foreach \s/\n [count=\j from 0] in {D/Schellen,H/Rosen,S/Schilten,C/Eichel} {
+  \node[anchor=east] at (0.4,-\j) {\s\ \n};
+  \foreach \i in {0,...,8} {
+    \pgfmathtruncatemacro{\c}{\j*9+\i}
+    \node[draw=gray!60, fill=gray!8, minimum width=0.66cm, minimum height=0.44cm] at (\i+1,-\j) {\c};
+  }
+}
+\node[anchor=west, text width=5.8cm] at (10.2,-1.5) {
+  \textbf{Trump order:} J\,$>$\,9\,$>$\,A\,$>$\,K\,$>$\,Q\,$>$\,10\,$>$\,8\,$>$\,7\,$>$\,6\\
+  \textbf{Points:} trump J 20, 9 14; A 11, 10 10, K 4, Q 3, J 2;
+  Obenabe/Undeufe: 8 = 8, Undeufe 6 = 11 / A = 0.
+  $152 + 5$ (last trick) $= 157$; all tricks $= 257$.};
+\end{tikzpicture}
+\end{center}
+
+Implemented: follow suit; trumping in is always allowed; no under-trumping unless only trumps are left;
+the Puur (trump J) never has to be played; push to partner.
+\textbf{Not yet:} Weis, St\"ock, trump multipliers (P1). The Swisslos logs contain none of these either.
+
+%------------------------------------------------------------------------------
+\section{Data}
+The Swisslos logs (collected by HSLU for DL4G) contain every trick of each game, so all four hands can be
+reconstructed exactly. There are \NCards{} labelled card decisions. A separate file holds 359\,825 trump decisions with the hand.
+
+\begin{figure}[h]
+\centering
+\begin{tikzpicture}
+\begin{axis}[width=0.47\textwidth, height=5cm, ybar stacked, bar width=14pt, ymin=0,
+  ylabel={\% of games}, xtick=data, symbolic x coords={0,1,2,3,4,5},
+  xticklabels={Schellen,Rosen,Schilten,Eichel,Obe,Une}, x tick label style={font=\scriptsize, rotate=30, anchor=east},
+  legend style={font=\scriptsize, at={(0.02,0.98)}, anchor=north west}, title={\small Trump choice (push rate \PushRate)}]
+\addplot[fill=blue!55, draw=none] table[x=idx, y=share_direct, col sep=comma] {data/trump.csv};
+\addplot[fill=orange!70, draw=none] table[x=idx, y=share_pushed, col sep=comma] {data/trump.csv};
+\legend{forehand, after push}
+\end{axis}
+\end{tikzpicture}\hfill
+\begin{tikzpicture}
+\begin{axis}[width=0.47\textwidth, height=5cm, ybar, bar width=4pt, ymin=0, xmin=0, xmax=265,
+  xlabel={declaring team's points}, ylabel={\% of games}, title={\small Declarer points (mean \DeclMean)},
+  extra x ticks={78.5}, extra x tick labels={}, extra x tick style={grid=major, grid style={dashed, accent}}]
+\addplot[fill=blue!55, draw=none] table[x=bin, y=share, col sep=comma] {data/decl_points.csv};
+\end{axis}
+\end{tikzpicture}
+\caption{Left: forehand often pushes (\PushRate); black suits and Undeufe are declared directly most often.
+Right: the declaring team wins \DeclWin{} of rounds (dashed: half of 157); \MatchRate{} of games are matches (257).}
+\end{figure}
+
+%------------------------------------------------------------------------------
+\section{Simulator}
+\begin{center}
+\begin{tikzpicture}[box/.style={draw, rounded corners=2pt, font=\scriptsize\sffamily, align=center, minimum height=0.75cm},
+  arr/.style={-{Stealth[length=2mm]}, thick}]
+\foreach \i in {0,1,2} \node[box, fill=green!10, minimum width=1.9cm] (w\i) at (0,-\i*0.9) {worker \i};
+\node[font=\scriptsize] at (0,-2.55) {$\vdots$ one per core};
+\node[box, fill=gray!10, text width=2.4cm] (st) at (3.4,-0.9) {per-thread atomic counters (cache-line aligned)};
+\node[box, fill=gray!10] (rep) at (6.6,-0.9) {reporter\\JSONL heartbeat};
+\node[box, fill=blue!7, text width=2.7cm] (mon) at (10.3,-0.3) {\texttt{stammtisch monitor}\\live dashboard: rate, CPU, temp, results};
+\node[box, fill=blue!7] (log) at (10.3,-1.6) {\texttt{runs/*.jsonl}};
+\foreach \i in {0,1,2} \draw[arr] (w\i.east) -- (st.west);
+\draw[arr] (st) -- (rep); \draw[arr] (rep) -- (mon.west); \draw[arr] (rep) -- (log.west);
+\end{tikzpicture}
+\end{center}
+
+\begin{minipage}[t]{0.5\textwidth}
+\vspace{0pt}
+\begin{tikzpicture}
+\begin{axis}[width=\textwidth, height=5.2cm, xlabel={threads}, ylabel={M rounds/s}, ymin=0,
+  legend style={font=\scriptsize, at={(0.02,0.98)}, anchor=north west}, grid=major, grid style={gray!20},
+  title={\small Throughput on this ThinkPad}]
+\addplot+[mark=*, thick] table[x=threads, y expr=\thisrow{random}/1e6, col sep=comma] {data/scaling.csv};
+\addplot+[mark=square*, thick] table[x=threads, y expr=\thisrow{heuristic}/1e6, col sep=comma] {data/scaling.csv};
+\legend{random agents, heuristic agents}
+\end{axis}
+\end{tikzpicture}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.46\textwidth}
+\vspace{2pt}
+\begin{itemize}
+\item Bitboard hands; legal moves in a few bit operations.
+\item \SingleHeuristic{} rounds/s on one thread, \PeakHeuristic{} with all \Cores{} (heuristic agents).
+  Only 2 of the cores are performance cores, so scaling is sub-linear.
+\item Laptop numbers depend on turbo and power limits (best of 3 shown). Long runs at $\approx$100\,$^\circ$C
+  vary by up to $\pm$25\,\%. The monitor shows frequency and temperature next to the rate.
+\item Duplicate deals: each deal is played twice with seats swapped, which cancels most card luck.
+\item \texttt{VecEnv} C API: $N$ rounds stepped in one call, with numpy views for learning agents.
+\end{itemize}
+\end{minipage}
+
+\begin{figure}[h]
+\centering
+{\fontsize{5.2}{6}\selectfont\VerbatimInput[fontfamily=\dashfam]{data/monitor.txt}}
+\caption{\texttt{make monitor}: live dashboard (final frame of a 4\,s run; heuristic vs.\ random, 14 threads).
+Every heartbeat is also logged to \texttt{runs/*.jsonl}.}
+\end{figure}
+
+\subsection*{Validation}
+\begin{tabular}{@{}lr@{}}
+\toprule
+Check & Result \\ \midrule
+Swisslos games replayed (every card legal, winners and points exact) & \NReplayOK{} / \NGames \\
+Legal moves vs.\ HSLU \texttt{jass-kit}, 119\,073 random states & 173 differ, all jass-kit bug$^\ast$ \\
+Trick winners vs.\ \texttt{jass-kit}, 20\,000 random tricks & identical \\
+Heuristic vs.\ random (2\,M duplicate deals, points/round, 95\,\% CI) & \HeurDiff{}, win rate \HeurWin \\
+Random vs.\ random / heuristic vs.\ heuristic & $\approx 0$ (sanity) \\
+\bottomrule
+\end{tabular}
+
+{\footnotesize $^\ast$\,With two trumps already in a trick, \texttt{jass-kit} takes the one with the larger
+card index as highest instead of the higher trump rank, and then allows under-trumping. None of the
+human games hit this case (the Swisslos server enforces the rule), so it only affects bots trained with jass-kit.}
+
+%------------------------------------------------------------------------------
+\section{Log}
+\begin{description}[style=nextline, leftmargin=1.5em, font=\normalfont\bfseries]
+\item[2026-09-26 --- P0 complete]
+Literature and project survey. Found the Swisslos logs mirrored in public DL4G student repositories;
+drafted a request to HSLU (Prof.\ Th.\ Koller) for permission to use them.
+Built the C++ engine, multi-threaded simulator with live monitoring, and \texttt{VecEnv}.
+Validated against all human games and \texttt{jass-kit}; found one \texttt{jass-kit} rule bug.
+\item[Next --- P1]
+Implement Weis/St\"ock and multipliers (with rule variants), arena with Elo and significance tests, data
+splits, jass-server client for the HSLU tournament.
+\end{description}
+
+\section*{References}
+\footnotesize
+\begin{itemize}
+\item HSLU DL4G, \texttt{jass-kit-py}: \url{https://github.com/thomas-koller/jass-kit-py}
+\item Niklaus et al., \emph{Survey of AI for Card Games and its Application to the Swiss Game Jass}, SDS 2019. arXiv:1906.04439
+\item Uni Bern theses: AlphaZero for Jass (Zenodo 6400547), Approximate Nash Equilibria for Jass (Zenodo 7733443)
+\item Brown \& Sandholm, \emph{Superhuman AI for multiplayer poker} (Pluribus), Science 2019; Brown et al., \emph{ReBeL}, NeurIPS 2020
+\item Perolat et al., \emph{Mastering Stratego with model-free multiagent RL} (DeepNash), Science 2022
+\item Swisslos Schieber rules: \url{https://www.swisslos.ch/de/jass/informationen/jass-regeln/schieber-jass.html}
+\end{itemize}
+\end{document}

@@ -1,0 +1,17 @@
+[project]
+name = "stammtisch"
+version = "0.1.0"
+description = "AI for the Swiss card game Jass (Schieber)"
+requires-python = ">=3.10"
+dependencies = ["numpy>=1.24", "rich>=13", "psutil>=5.9"]
+
+[project.optional-dependencies]
+# jass-kit is only needed for the differential tests against the HSLU reference
+dev = ["pytest>=7", "jass-kit @ git+https://github.com/thomas-koller/jass-kit-py"]
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["stammtisch"]

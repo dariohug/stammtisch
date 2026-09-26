@@ -1,0 +1,13 @@
+{
+  "games": 1821878,
+  "replay_ok": 1821878,
+  "cards": 65587608,
+  "players": 4608,
+  "push_rate": 0.620329132905716,
+  "decl_mean": 115.88194379645618,
+  "decl_win_rate": 0.8099494038568993,
+  "match_rate": 0.08959491250237392,
+  "date_from": "2017-10-08",
+  "date_to": "2018-04-15",
+  "jasskit_rejected_human_plays": 0
+}

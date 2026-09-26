@@ -1,0 +1,4 @@
+a,b,deals,diff,ci95,winrate_a
+heuristic,random,2000000,63.879,0.071,0.8144
+random,random,2000000,-0.012,0.068,0.5000
+heuristic,heuristic,2000000,0.000,0.000,0.5000
