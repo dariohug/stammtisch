@@ -1,14 +1,17 @@
 #include "agents.hpp"
 
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <sstream>
+#include <vector>
+
+#include "dd.hpp"
+#include "features.hpp"
+#include "net.hpp"
+#include "pimc.hpp"
+
 namespace jass {
-
-bool parse_agent(const std::string& name, AgentKind& out) {
-    if (name == "random") { out = AgentKind::Random; return true; }
-    if (name == "heuristic") { out = AgentKind::Heuristic; return true; }
-    return false;
-}
-
-const char* agent_name(AgentKind k) { return k == AgentKind::Random ? "random" : "heuristic"; }
 
 int trump_score(Cards hand, int mode) {
     //                        A   K  Q  J  10  9  8  7  6
@@ -62,7 +65,9 @@ bool is_master(int card, const Round& r) {
     return true;
 }
 
-int heuristic_card(const Round& r, Rng& rng) {
+}  // namespace
+
+int heuristic_card(const Round& r) {
     const Cards legal = r.legal();
     const int trump = r.trump;
     if (popcount(legal) == 1) return lowest(legal);
@@ -106,19 +111,11 @@ int heuristic_card(const Round& r, Rng& rng) {
         if (key < best_key) { best = c; best_key = key; }
     }
     if (best >= 0) return best;
-    (void)rng;
     return pick_by_value(legal, trump, false);
 }
 
-}  // namespace
-
-int choose_trump(AgentKind k, const Round& r, Rng& rng) {
+int heuristic_trump(const Round& r) {
     const Cards hand = r.hands[r.trump_chooser()];
-    if (k == AgentKind::Random) {
-        int n = r.pushed ? 6 : 7;
-        int t = static_cast<int>(rng.below(n));
-        return t == 6 ? kPush : t;
-    }
     int best = 0, best_score = -1;
     for (int m = 0; m < 6; ++m) {
         int s = trump_score(hand, m);
@@ -128,9 +125,197 @@ int choose_trump(AgentKind k, const Round& r, Rng& rng) {
     return best;
 }
 
-int choose_card(AgentKind k, const Round& r, Rng& rng) {
-    if (k == AgentKind::Random) return rng.pick(r.legal());
-    return heuristic_card(r, rng);
+namespace {
+
+class RandomAgent : public Agent {
+public:
+    int choose_trump(const Round& r, Rng& rng) override {
+        const int t = static_cast<int>(rng.below(r.pushed ? 6 : 7));
+        return t == 6 ? kPush : t;
+    }
+    int choose_card(const Round& r, Rng& rng) override { return rng.pick(r.legal()); }
+    std::string name() const override { return "random"; }
+};
+
+class HeuristicAgent : public Agent {
+public:
+    int choose_trump(const Round& r, Rng&) override { return heuristic_trump(r); }
+    int choose_card(const Round& r, Rng&) override { return heuristic_card(r); }
+    std::string name() const override { return "heuristic"; }
+};
+
+class NetAgent : public Agent {
+public:
+    NetAgent(std::shared_ptr<const Mlp> card, std::shared_ptr<const Mlp> trump, bool sample)
+        : card_(std::move(card)), trump_(std::move(trump)), sample_(sample) {}
+
+    int choose_trump(const Round& r, Rng& rng) override {
+        float x[kTrumpFeatures], out[kTrumpActions];
+        trump_features(r.hands[r.trump_chooser()], r.pushed, x);
+        trump_->forward(x, out);
+        const int n = r.pushed ? 6 : 7;
+        const int a = pick(out, n, [](int) { return true; }, rng);
+        return a == 6 ? kPush : a;
+    }
+
+    int choose_card(const Round& r, Rng& rng) override {
+        const Cards legal = r.legal();
+        if (popcount(legal) == 1) return lowest(legal);
+        float x[kCardFeatures], out[36];
+        card_features(r, x);
+        card_->forward(x, out);
+        return pick(out, 36, [&](int c) { return (legal >> c) & 1; }, rng);
+    }
+
+    std::string name() const override { return label_ + (sample_ ? ":sample" : ""); }
+    std::string label_ = "net";
+
+private:
+    template <typename Ok>
+    int pick(const float* logits, int n, Ok ok, Rng& rng) const {
+        int best = -1;
+        for (int i = 0; i < n; ++i)
+            if (ok(i) && (best < 0 || logits[i] > logits[best])) best = i;
+        if (!sample_) return best;
+        double p[36], total = 0;
+        for (int i = 0; i < n; ++i) total += p[i] = ok(i) ? std::exp(static_cast<double>(logits[i] - logits[best])) : 0.0;
+        double u = (rng.next() >> 11) * (1.0 / 9007199254740992.0) * total;
+        for (int i = 0; i < n; ++i)
+            if ((u -= p[i]) <= 0 && p[i] > 0) return i;
+        return best;
+    }
+
+    std::shared_ptr<const Mlp> card_, trump_;
+    bool sample_;
+};
+
+// variant "" = imitation of humans (card_policy.bin), "strong" = distilled from search
+// (card_policy_strong.bin).
+std::unique_ptr<Agent> make_net(bool sample, std::string* err, const std::string& variant = "") {
+    auto card = Mlp::load(models_dir() + (variant.empty() ? "/card_policy.bin" : "/card_policy_" + variant + ".bin"), err);
+    if (!card) return nullptr;
+    auto trump = Mlp::load(models_dir() + "/trump_policy.bin", err);
+    if (!trump) return nullptr;
+    if (card->in_size() != kCardFeatures || card->out_size() != 36 || trump->in_size() != kTrumpFeatures ||
+        trump->out_size() != kTrumpActions) {
+        if (err) *err = "model shapes do not match the feature layout - retrain";
+        return nullptr;
+    }
+    auto agent = std::make_unique<NetAgent>(std::move(card), std::move(trump), sample);
+    if (!variant.empty()) agent->label_ = "net:" + variant;
+    return agent;
+}
+
+// Search agent: PIMC over sampled deals; each sample is played out by the rollout policy
+// until `exact_left` tricks remain and then solved exactly.
+class PimcAgent : public Agent {
+public:
+    PimcAgent(const SearchConfig& cfg, int trump_samples, std::unique_ptr<Agent> rollout)
+        : cfg_(cfg), trump_samples_(trump_samples), rollout_(std::move(rollout)), dd_(21) {
+        cfg_.rollout = rollout_.get();
+    }
+
+    int choose_trump(const Round& r, Rng& rng) override {
+        if (trump_samples_ <= 0) return rollout_->choose_trump(r, rng);
+        SearchConfig tc = cfg_;
+        tc.samples = trump_samples_;
+        double v[7];
+        pimc_trump_values(r, tc, rng, dd_, v, rollout_.get());
+        int best = 0;
+        for (int m = 1; m < 6; ++m)
+            if (v[m] > v[best]) best = m;
+        if (!r.pushed && v[6] > v[best]) return kPush;
+        return best;
+    }
+
+    int choose_card(const Round& r, Rng& rng) override {
+        const Cards legal = r.legal();
+        if (popcount(legal) == 1) return lowest(legal);
+        int cards[9];
+        double values[9];
+        const int n = pimc_card_values(r, cfg_, rng, dd_, cards, values);
+        int best = 0;
+        for (int i = 1; i < n; ++i)
+            if (values[i] > values[best] + 1e-9) best = i;
+        return cards[best];
+    }
+
+    std::string name() const override {
+        char b[32];
+        std::snprintf(b, sizeof b, "%g", cfg_.belief);
+        return "pimc:n=" + std::to_string(cfg_.samples) + ",t=" + std::to_string(trump_samples_) +
+               ",k=" + std::to_string(cfg_.exact_left) + ",b=" + b + ",roll=" + rollout_->name();
+    }
+
+private:
+    SearchConfig cfg_;
+    int trump_samples_;
+    std::unique_ptr<Agent> rollout_;
+    DDSolver dd_;
+};
+
+}  // namespace
+
+std::unique_ptr<Agent> make_agent(const std::string& spec, std::string* err) {
+    const auto colon = spec.find(':');
+    const std::string kind = spec.substr(0, colon);
+    const std::string args = colon == std::string::npos ? "" : spec.substr(colon + 1);
+    if (kind == "random" && args.empty()) return std::make_unique<RandomAgent>();
+    if (kind == "heuristic" && args.empty()) return std::make_unique<HeuristicAgent>();
+    if (kind == "net") {  // net[:strong][,sample]
+        bool sample = false;
+        std::string variant;
+        std::stringstream ss(args);
+        for (std::string tok; std::getline(ss, tok, ',');) {
+            if (tok == "sample") sample = true;
+            else if (tok == "strong") variant = "strong";
+            else if (!tok.empty()) { if (err) *err = "unknown net option '" + tok + "'"; return nullptr; }
+        }
+        return make_net(sample, err, variant);
+    }
+    if (kind == "pimc") {
+        // pimc[:n=32,t=0,k=5,b=0.5,c=4,roll=net|heuristic|strong]   (a bare number is n)
+        int n = 32, t = 0, k = 5, cands = 4;  // t=0: trump by the policy (A/B: as strong, far cheaper)
+        double belief = -1;  // default: 0.5 when the behaviour models are available
+        std::string roll = "auto";
+        std::stringstream ss(args);
+        for (std::string kv; std::getline(ss, kv, ',');) {
+            if (kv.empty()) continue;
+            const auto eq = kv.find('=');
+            const std::string key = eq == std::string::npos ? "n" : kv.substr(0, eq);
+            const std::string val = eq == std::string::npos ? kv : kv.substr(eq + 1);
+            if (key == "n") n = std::max(1, std::atoi(val.c_str()));
+            else if (key == "t") t = std::max(0, std::atoi(val.c_str()));
+            else if (key == "k") k = std::min(9, std::max(0, std::atoi(val.c_str())));
+            else if (key == "roll") roll = val;
+            else if (key == "b") belief = std::max(0.0, std::atof(val.c_str()));
+            else if (key == "c") cands = std::max(1, std::atoi(val.c_str()));
+            else { if (err) *err = "unknown pimc option '" + key + "'"; return nullptr; }
+        }
+        std::unique_ptr<Agent> rollout;
+        if (roll == "net" || roll == "auto" || roll == "strong") {
+            std::string net_err;
+            rollout = make_net(false, &net_err, roll == "strong" ? "strong" : "");
+            if (!rollout && roll != "auto") { if (err) *err = net_err; return nullptr; }
+        }
+        if (!rollout) rollout = std::make_unique<HeuristicAgent>();
+        SearchConfig cfg;
+        cfg.samples = n;
+        cfg.exact_left = k;
+        cfg.candidates = cands;
+        auto card = Mlp::load(models_dir() + "/card_policy.bin");
+        auto trump = Mlp::load(models_dir() + "/trump_policy.bin");
+        if (card && trump) {  // cached for the whole process, so raw pointers stay valid
+            cfg.card_model = card.get();
+            cfg.trump_model = trump.get();
+            cfg.belief = belief < 0 ? 0.5 : belief;
+        } else {
+            cfg.belief = 0;
+        }
+        return std::make_unique<PimcAgent>(cfg, t, std::move(rollout));
+    }
+    if (err) *err = "unknown agent spec '" + spec + "' (random | heuristic | net[:sample] | pimc[:n=,t=,k=,roll=])";
+    return nullptr;
 }
 
 }  // namespace jass

@@ -1,0 +1,5 @@
+variant;change;diff;ci95
+pimc:b=1;belief strength 1 instead of 0.5;-6.9;7.9
+pimc:t=0;trump by the policy instead of 16-deal search;+4.8;7.7
+pimc:k=6;exact for the last 6 tricks instead of 5 ($2.3\times$ slower);+3.2;8.6
+pimc:b=0;no belief (uniform sampling);-9.5;10.2

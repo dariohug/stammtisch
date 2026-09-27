@@ -12,7 +12,7 @@ from .engine import ROOT
 from .monitor import SIM
 
 OUT = ROOT / "docs" / "data"
-MODES = ["Schellen", "Rosen", "Schilten", "Eichel", "Obenabe", "Undeufe"]
+MODES = ["Eichel", "Rosen", "Schilten", "Schellen", "Obenabe", "Undeufe"]  # Swisslos mapping (D H S C)
 
 
 def _sim(*args: str) -> dict:
@@ -127,3 +127,90 @@ def dataset_stats() -> None:
         f.write(f"\\newcommand{{\\DateTo}}{{{summary['date_to']}}}\n")
         f.write(f"\\newcommand{{\\JassKitRejected}}{{{rejected:,}}}\n".replace(",", "'"))
     print(json.dumps(summary, indent=2))
+
+
+def dd_timing() -> None:
+    """Exact-solver cost by tricks remaining (engine-test --bench) -> docs/data/dd_timing.csv."""
+    import re
+    OUT.mkdir(parents=True, exist_ok=True)
+    out = subprocess.run([str(ROOT / "build" / "engine-test"), "--bench"], capture_output=True, text=True,
+                         check=True).stdout
+    rows = re.findall(r"tricks left (\d+): mean ([\d.]+) ms, worst ([\d.]+) ms, (\d+) nodes", out)
+    with open(OUT / "dd_timing.csv", "w") as f:
+        f.write("left,mean_ms,worst_ms,nodes\n")
+        for left, mean, worst, nodes in rows:
+            f.write(f"{left},{mean},{worst},{nodes}\n")
+    print(out)
+
+
+def training_curves() -> None:
+    """runs/train_*.jsonl -> docs/data/train_card.csv, train_trump.csv and LaTeX macros."""
+    OUT.mkdir(parents=True, exist_ok=True)
+    runs = ROOT / "runs"
+    card = [json.loads(l) for l in (runs / "train_card_policy.jsonl").read_text().splitlines() if l.strip()]
+    trump = [json.loads(l) for l in (runs / "train_trump_policy.jsonl").read_text().splitlines() if l.strip()]
+    with open(OUT / "train_card.csv", "w") as f:
+        f.write("samples_m,val_acc,val_acc_nonforced\n")
+        for r in card:
+            f.write(f"{r['samples'] / 1e6:.2f},{r['val_acc'] * 100:.2f},{r['val_acc_nonforced'] * 100:.2f}\n")
+    last, t = card[-1], trump[-1]
+    with open(OUT / "learning.tex", "w") as f:
+        f.write(f"\\newcommand{{\\CardAcc}}{{{last['val_acc'] * 100:.1f}\\,\\%}}\n")
+        f.write(f"\\newcommand{{\\CardAccChoice}}{{{last['val_acc_nonforced'] * 100:.1f}\\,\\%}}\n")
+        f.write(f"\\newcommand{{\\CardSamples}}{{{last['samples'] / 1e6:.0f}\\,M}}\n")
+        f.write(f"\\newcommand{{\\TrumpAcc}}{{{t['val_acc'] * 100:.1f}\\,\\%}}\n")
+        f.write(f"\\newcommand{{\\TrumpAccFH}}{{{t['val_acc_forehand'] * 100:.1f}\\,\\%}}\n")
+    print(f"card policy: val acc {last['val_acc']:.4f} (non-forced {last['val_acc_nonforced']:.4f}); "
+          f"trump: {t['val_acc']:.4f}")
+
+
+DEFAULT_ARENA_NOTE = ""
+
+
+def _vs(results: list[dict], a: str, b: str) -> str | None:
+    for x in results:
+        if {x["agent_a"], x["agent_b"]} == {a, b}:
+            sign = 1 if x["agent_a"] == a else -1
+            return f"{sign * x['diff_per_round']:+.1f}\\,$\\pm$\\,{x['diff_ci95']:.1f}"
+    return None
+
+
+def arena_numbers(note: str = DEFAULT_ARENA_NOTE, headline: str = "pimc") -> None:
+    """headline: the agent named in the report's summary (the default search agent)."""
+    """Latest arena run -> docs/data/arena.tex (best agent, search vs. imitation, note)."""
+    runs = sorted((ROOT / "runs" / "arena").glob("*.json"))
+    if not runs:
+        raise SystemExit("no arena run yet - python -m stammtisch arena")
+    r = json.loads(runs[-1].read_text())
+    elo = r["elo"]
+    best = headline if headline in elo else max(elo, key=elo.get)
+    vs = [x for x in r["results"] if {x["agent_a"], x["agent_b"]} == {best, "net"}]
+    txt = "n/a"
+    if vs:
+        x = vs[0]
+        sign = 1 if x["agent_a"] == best else -1
+        txt = f"{sign * x['diff_per_round']:+.1f}\\,$\\pm$\\,{x['diff_ci95']:.1f}"
+    esc = lambda s: s.replace("_", "\\_")  # noqa: E731
+    if not note:
+        # Latest result per pair across all arena runs (ablations may come from older runs).
+        latest: dict = {}
+        ablations = sorted((ROOT / "runs" / "ablation").glob("*.json"))
+        for path in [*runs, *ablations]:
+            for x in json.loads(path.read_text())["results"]:
+                latest[frozenset((x["agent_a"], x["agent_b"]))] = x
+        allres = list(latest.values())
+        with_b, without_b = _vs(allres, "pimc", "net"), _vs(allres, "pimc:b=0", "net")
+        if with_b and without_b:
+            note = ("Against the human-like imitation policy, search with belief scores " + with_b +
+                    " points per round, the same search without belief " + without_b + ".")
+    latest_all: dict = {}
+    for path in [*runs, *sorted((ROOT / "runs" / "ablation").glob("*.json"))]:
+        for x in json.loads(path.read_text())["results"]:
+            latest_all[frozenset((x["agent_a"], x["agent_b"]))] = x
+    strong = _vs(list(latest_all.values()), "net:strong", "net") or "n/a"
+    with open(OUT / "arena.tex", "w") as f:
+        f.write(f"\\newcommand{{\\StrongVsNet}}{{{strong}}}\n")
+        f.write(f"\\newcommand{{\\BestAgent}}{{\\texttt{{{esc(best)}}}}}\n")
+        f.write(f"\\newcommand{{\\SearchVsNet}}{{{txt}}}\n")
+        f.write(f"\\newcommand{{\\ArenaNote}}{{{note}}}\n")
+    print(f"best {best} ({elo[best]:.0f}); vs net {txt}")

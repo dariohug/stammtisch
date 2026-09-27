@@ -76,6 +76,14 @@ void Round::reset(const Cards h[4], int dealer_seat) {
     trick_first = to_play = forehand();
     points[0] = points[1] = 0;
     tricks_won[0] = tricks_won[1] = 0;
+    bonus[0] = bonus[1] = 0;
+    weis_team = -1;
+    for (int p = 0; p < 4; ++p) { initial[p] = h[p]; shown[p] = 0; }
+}
+
+void Round::reset(const Cards h[4], int dealer_seat, const Rules& r) {
+    rules = r;
+    reset(h, dealer_seat);
 }
 
 void Round::choose_trump(int t) {
@@ -85,6 +93,64 @@ void Round::choose_trump(int t) {
     }
     declarer = trump_chooser();
     trump = t;
+    compute_bonus(*this);
+}
+
+Weis weis_of(Cards hand, int trump) {
+    Weis w;
+    auto add = [&](int pts, int ncards, bool is_trump, Cards cards) {
+        w.points += pts;
+        w.cards |= cards;
+        const int key = pts * 1000 + ncards * 10 + (is_trump ? 1 : 0);
+        if (key > w.best_key) w.best_key = key;
+    };
+    for (int s = 0; s < 4; ++s) {
+        const unsigned b = static_cast<unsigned>(hand >> (9 * s)) & 0x1FF;
+        for (int i = 0; i < 9;) {  // consecutive rank indices = consecutive cards (A K Q J 10 9 8 7 6)
+            if (!(b >> i & 1)) { ++i; continue; }
+            int j = i;
+            while (j + 1 < 9 && (b >> (j + 1) & 1)) ++j;
+            const int len = j - i + 1;
+            if (len >= 3) {
+                const int pts = len == 3 ? 20 : len == 4 ? 50 : 100 + 50 * (len - 5);
+                add(pts, len, s == trump, (Cards{(1u << len) - 1} << i) << (9 * s));
+            }
+            i = j + 1;
+        }
+    }
+    constexpr int kFourPts[9] = {100, 100, 100, 200, 100, 150, 0, 0, 0};
+    for (int r = 0; r < 9; ++r) {
+        const Cards four = bit(r) | bit(9 + r) | bit(18 + r) | bit(27 + r);
+        if (kFourPts[r] && (hand & four) == four) add(kFourPts[r], 4, false, four);
+    }
+    return w;
+}
+
+void compute_bonus(Round& r) {
+    r.bonus[0] = r.bonus[1] = 0;
+    r.weis_team = -1;
+    for (int p = 0; p < 4; ++p) r.shown[p] = 0;
+    if (r.rules.weis) {
+        Weis w[4];
+        int best_seat = -1, best_key = 0;
+        int seat = r.forehand();
+        for (int i = 0; i < 4; ++i, seat = next_seat(seat)) {  // strict '>' keeps the earlier seat on ties
+            w[seat] = weis_of(r.initial[seat], r.trump);
+            if (w[seat].best_key > best_key) { best_key = w[seat].best_key; best_seat = seat; }
+        }
+        if (best_seat >= 0) {
+            r.weis_team = team_of(best_seat);
+            for (int p = r.weis_team; p < 4; p += 2) {
+                r.bonus[r.weis_team] += w[p].points;
+                r.shown[p] = w[p].cards;
+            }
+        }
+    }
+    if (r.rules.stoeck && r.trump < kObe) {
+        const Cards kq = bit(r.trump * 9 + 1) | bit(r.trump * 9 + 2);
+        for (int p = 0; p < 4; ++p)
+            if ((r.initial[p] & kq) == kq) r.bonus[team_of(p)] += kStoeck;
+    }
 }
 
 void Round::play(int card) {

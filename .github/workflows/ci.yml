@@ -1,0 +1,31 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 3 * * 1"   # weekly: engine regression + baseline arena
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build engine (portable, no -march=native)
+        run: |
+          cmake -S engine -B build -DCMAKE_BUILD_TYPE=Release -DJASS_NATIVE=OFF
+          cmake --build build -j
+      - name: Engine self-tests (DD solver vs brute force, Weis, sampler)
+        run: build/engine-test
+      - name: Python tests (Swisslos replay is skipped without data)
+        run: |
+          python -m pip install -q numpy rich psutil pytest "jass-kit @ git+https://github.com/thomas-koller/jass-kit-py"
+          python -m pytest -q tests
+      - name: Simulator smoke + baseline arena
+        run: |
+          build/jass-sim --games 20000 --a heuristic --b random --interval 60 | tail -1
+          build/jass-sim --games 20 --a "pimc:n=8,t=4" --b heuristic --interval 60 | tail -1

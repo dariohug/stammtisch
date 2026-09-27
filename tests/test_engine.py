@@ -55,7 +55,7 @@ def test_trick_winner(trick, trump, winner):
 
 
 def test_round_points_total_157_or_match():
-    env = engine.VecEnv(64, seed=3)
+    env = engine.VecEnv(64, seed=3, rules="plain")
     scores = []
     while len(scores) < 64:
         env.step(env.builtin_actions("random"))

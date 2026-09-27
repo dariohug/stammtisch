@@ -1,0 +1,11 @@
+a;b;deals;diff;ci95;wins_a;wins_b
+heuristic;net;40000;-95.6;1.2;26676;53324
+heuristic;net:strong;40000;-96.8;1.2;26004;53996
+heuristic;pimc;400;-107.6;11.0;243;557
+heuristic;pimc:roll=strong;400;-115.6;11.5;224;576
+net;net:strong;40000;-3.3;0.6;39057;40943
+net;pimc;400;-28.4;7.8;357;443
+net;pimc:roll=strong;400;-27.3;6.8;359;441
+net:strong;pimc;400;-20.3;7.0;377;423
+net:strong;pimc:roll=strong;400;-21.6;7.5;378;422
+pimc;pimc:roll=strong;400;-2.2;6.6;398;402

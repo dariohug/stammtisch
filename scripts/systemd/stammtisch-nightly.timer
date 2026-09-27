@@ -1,0 +1,9 @@
+[Unit]
+Description=Run stammtisch nightly regression at 03:30 (only on AC power is up to you)
+
+[Timer]
+OnCalendar=*-*-* 03:30:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

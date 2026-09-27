@@ -66,9 +66,33 @@ inline int trick_points(const int* trick, int trump, bool last) {
     return pv[trick[0]] + pv[trick[1]] + pv[trick[2]] + pv[trick[3]] + (last ? kLastTrickBonus : 0);
 }
 
+// Scoring variant. Card play is identical in all variants.
+struct Rules {
+    bool weis = true;
+    bool stoeck = true;
+    int8_t mult[6] = {1, 1, 2, 2, 3, 3};  // Swisslos: Herz/Ecken x1, Schaufel/Kreuz x2, Obe/Une x3
+
+    static Rules swisslos() { return Rules{}; }
+    // Card points only (what the Swisslos logs and jass-kit score).
+    static Rules plain() { return Rules{false, false, {1, 1, 1, 1, 1, 1}}; }
+};
+
+// Weis (melds): sequences of >= 3 in a suit (20/50/100/150/...), four of a kind
+// (J 200, 9 150, A/K/Q/10 100). Only the team with the best single Weis scores,
+// ties by number of cards, then trump sequence, then earlier seat from forehand.
+struct Weis {
+    int points = 0;      // sum over all melds of the hand
+    int best_key = 0;    // comparable strength of the best single meld, 0 = none
+    Cards cards = 0;     // cards used in melds
+};
+Weis weis_of(Cards hand, int trump);
+constexpr int kStoeck = 20;
+
 // Full state of one Schieber round (one deal, 9 tricks).
 struct Round {
+    Rules rules;
     Cards hands[4]{};
+    Cards initial[4]{};
     Cards played = 0;
     int dealer = 0;
     int trump = -1;
@@ -81,10 +105,14 @@ struct Round {
     int to_play = 0;
     int points[2]{0, 0};
     int tricks_won[2]{0, 0};
-    int history[36];  // cards in play order
+    int bonus[2]{0, 0};    // Weis + Stöck, fixed once trump is known
+    int weis_team = -1;    // team whose Weis counted
+    Cards shown[4]{};      // Weis cards laid open by the winning team (public after trick 1)
+    int history[36];       // cards in play order
     int winners[9];
 
-    void reset(const Cards h[4], int dealer_seat);
+    void reset(const Cards h[4], int dealer_seat);  // keeps the current rules
+    void reset(const Cards h[4], int dealer_seat, const Rules& rules);
     int forehand() const { return next_seat(dealer); }
     // Trump phase: seat to decide, or -1 if trump is set.
     int trump_chooser() const { return trump >= 0 ? -1 : (pushed ? partner(forehand()) : forehand()); }
@@ -92,11 +120,23 @@ struct Round {
     Cards legal() const { return legal_cards(hands[to_play], trick, n_in_trick, trump); }
     void play(int card);       // caller guarantees legality
     bool done() const { return n_tricks == 9; }
-    // Final score incl. match bonus (before trump multiplier).
-    int score(int team) const {
-        return points[team] + (tricks_won[team] == 9 ? kMatchBonus : 0);
+    int n_played() const { return n_tricks * 4 + n_in_trick; }
+    // Seat that played history[k] (k < n_played()).
+    int seat_of(int k) const {
+        int s = k < 4 ? forehand() : winners[k / 4 - 1];
+        for (int i = 0; i < k % 4; ++i) s = next_seat(s);
+        return s;
     }
+    // Raw points of a team: cards + match bonus + Weis/Stöck (no multiplier).
+    int raw_score(int team) const {
+        return points[team] + (tricks_won[team] == 9 ? kMatchBonus : 0) + bonus[team];
+    }
+    // Final score as written on the slate (multiplier applied).
+    int score(int team) const { return raw_score(team) * (trump >= 0 ? rules.mult[trump] : 1); }
 };
+
+// Weis + Stöck of both teams for a full deal and trump (sets bonus/weis_team/shown).
+void compute_bonus(Round& r);
 
 // Splitmix/xoshiro-style RNG, fast and reproducible.
 struct Rng {

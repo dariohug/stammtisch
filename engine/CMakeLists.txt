@@ -13,13 +13,16 @@ if(JASS_NATIVE)
   add_compile_options(-march=native)
 endif()
 
-add_library(jass_core STATIC src/rules.cpp src/agents.cpp)
+add_library(jass_core STATIC src/rules.cpp src/agents.cpp src/dd.cpp src/pimc.cpp src/features.cpp src/net.cpp)
 target_include_directories(jass_core PUBLIC include)
 set_target_properties(jass_core PROPERTIES POSITION_INDEPENDENT_CODE ON)
 
-add_library(jass SHARED src/capi.cpp)
-target_link_libraries(jass PRIVATE jass_core)
-
 find_package(Threads REQUIRED)
+add_library(jass SHARED src/capi.cpp)
+target_link_libraries(jass PRIVATE jass_core Threads::Threads)
+
 add_executable(jass-sim src/sim_main.cpp)
 target_link_libraries(jass-sim PRIVATE jass_core Threads::Threads)
+
+add_executable(engine-test tests/engine_test.cpp)
+target_link_libraries(engine-test PRIVATE jass_core)

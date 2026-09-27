@@ -9,6 +9,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -24,11 +25,15 @@ struct Options {
     uint64_t games = 1'000'000;  // deals (x2 rounds with --duplicate)
     double seconds = 0;          // if > 0: run for this long instead
     int threads = static_cast<int>(std::thread::hardware_concurrency());
-    AgentKind a = AgentKind::Heuristic, b = AgentKind::Random;
+    std::string a = "heuristic", b = "random";
+    std::string rules_name = "swisslos";
+    Rules rules = Rules::swisslos();
     bool duplicate = true;
     uint64_t seed = 1;
     double interval = 0.5;
+    uint64_t batch = 256;  // deals grabbed per work item (set to 1 for slow agents)
     FILE* out = stdout;
+    FILE* log = nullptr;  // --log: binary round records (see write_record)
 };
 
 // Per-thread counters, cache-line aligned; written by the worker, read by the reporter.
@@ -44,19 +49,33 @@ struct alignas(64) Stats {
 };
 
 std::atomic<uint64_t> g_next_deal{0};
+std::mutex g_log_mu;
+
+// 44 bytes per round: dealer, trump, pushed, agent A's team (0/1), 36 cards in play
+// order, and 4 bytes padding. Read by stammtisch/train.py (distillation).
+void write_record(FILE* f, const Round& r, int team_a) {
+    int8_t rec[44] = {};
+    rec[0] = static_cast<int8_t>(r.dealer);
+    rec[1] = static_cast<int8_t>(r.trump);
+    rec[2] = r.pushed ? 1 : 0;
+    rec[3] = static_cast<int8_t>(team_a);
+    for (int k = 0; k < 36; ++k) rec[4 + k] = static_cast<int8_t>(r.history[k]);
+    std::lock_guard<std::mutex> lock(g_log_mu);
+    std::fwrite(rec, 1, sizeof rec, f);
+}
 std::atomic<bool> g_stop{false};
 
 void add(std::atomic<uint64_t>& a, uint64_t v) { a.store(a.load(std::memory_order_relaxed) + v, std::memory_order_relaxed); }
 
 // Plays one round. seat_agent[p] is the agent of seat p; returns points of team 0 / 1.
-void play_round(Round& r, const AgentKind seat_agent[4], Rng& rng, Stats& st) {
+void play_round(Round& r, Agent* const seat_agent[4], Rng& rng, Stats& st) {
     while (r.trump < 0) {
-        const int t = choose_trump(seat_agent[r.trump_chooser()], r, rng);
+        const int t = seat_agent[r.trump_chooser()]->choose_trump(r, rng);
         if (t == kPush) add(st.pushes, 1);
         r.choose_trump(t);
     }
     add(st.trump[r.trump], 1);
-    while (!r.done()) r.play(choose_card(seat_agent[r.to_play], r, rng));
+    while (!r.done()) r.play(seat_agent[r.to_play]->choose_card(r, rng));
     add(st.cards, 36);
     add(st.rounds, 1);
 }
@@ -65,9 +84,10 @@ void worker(const Options& o, int tid, Stats& st) {
     Rng rng(o.seed * 0x100000001B3ull + static_cast<uint64_t>(tid) * 7919 + 17);
     Round r;
     Cards hands[4];
-    const AgentKind ab[4] = {o.a, o.b, o.a, o.b};  // A on seats 0/2
-    const AgentKind ba[4] = {o.b, o.a, o.b, o.a};  // A on seats 1/3
-    constexpr uint64_t kBatch = 256;
+    auto agent_a = make_agent(o.a), agent_b = make_agent(o.b);  // per thread: own search tables
+    Agent* const ab[4] = {agent_a.get(), agent_b.get(), agent_a.get(), agent_b.get()};  // A on seats 0/2
+    Agent* const ba[4] = {agent_b.get(), agent_a.get(), agent_b.get(), agent_a.get()};  // A on seats 1/3
+    const uint64_t kBatch = o.batch;
     while (!g_stop.load(std::memory_order_relaxed)) {
         const uint64_t start = g_next_deal.fetch_add(kBatch, std::memory_order_relaxed);
         if (o.seconds <= 0 && start >= o.games) break;
@@ -79,9 +99,10 @@ void worker(const Options& o, int tid, Stats& st) {
             const int dealer = static_cast<int>(g & 3);
             int score_a = 0, score_b = 0;
             for (int pass = 0; pass < (o.duplicate ? 2 : 1); ++pass) {
-                const AgentKind* seats = pass == 0 ? ab : ba;
-                r.reset(hands, dealer);
+                Agent* const* seats = pass == 0 ? ab : ba;
+                r.reset(hands, dealer, o.rules);
                 play_round(r, seats, rng, st);
+                if (o.log) write_record(o.log, r, pass == 0 ? 0 : 1);
                 const int ta = pass == 0 ? 0 : 1;  // team of agent A this pass
                 const int sa = r.score(ta), sb = r.score(1 - ta);
                 score_a += sa;
@@ -132,13 +153,13 @@ void emit(const Options& o, const char* type, double elapsed, double rate, const
     const double ci95 = t.deals > 1 ? 1.96 * std::sqrt(var / n) : 0.0;
     const double per = o.duplicate ? 2.0 : 1.0;
     std::fprintf(o.out,
-        "{\"type\":\"%s\",\"t\":%.3f,\"threads\":%d,\"agent_a\":\"%s\",\"agent_b\":\"%s\","
+        "{\"type\":\"%s\",\"t\":%.3f,\"threads\":%d,\"agent_a\":\"%s\",\"agent_b\":\"%s\",\"rules\":\"%s\","
         "\"duplicate\":%s,\"target\":%llu,\"seconds\":%.1f,"
         "\"rounds\":%llu,\"deals\":%llu,\"cards\":%llu,\"rounds_per_s\":%.1f,"
         "\"mean_points_a\":%.3f,\"mean_points_b\":%.3f,\"diff_per_round\":%.3f,\"diff_ci95\":%.3f,"
         "\"wins_a\":%llu,\"wins_b\":%llu,\"matches_a\":%llu,\"matches_b\":%llu,\"pushes\":%llu,"
         "\"trump\":[%llu,%llu,%llu,%llu,%llu,%llu],\"per_thread_rounds\":[",
-        type, elapsed, o.threads, agent_name(o.a), agent_name(o.b), o.duplicate ? "true" : "false",
+        type, elapsed, o.threads, o.a.c_str(), o.b.c_str(), o.rules_name.c_str(), o.duplicate ? "true" : "false",
         static_cast<unsigned long long>(o.seconds > 0 ? 0 : o.games), o.seconds,
         (unsigned long long)t.rounds, (unsigned long long)t.deals, (unsigned long long)t.cards, rate,
         t.pa / n / per, t.pb / n / per, mean / per, ci95 / per,
@@ -158,12 +179,14 @@ void usage() {
         "  --games N         deals to play (default 1000000)\n"
         "  --seconds S       run for S seconds instead of a fixed number of deals\n"
         "  --threads K       worker threads (default: all cores)\n"
-        "  --a AGENT         agent A: random | heuristic (default heuristic)\n"
+        "  --a AGENT         agent A: random | heuristic | pimc[:N[:T]] (default heuristic)\n"
         "  --b AGENT         agent B (default random)\n"
+        "  --rules R         swisslos (Weis, Stoeck, x1/x2/x3; default) | plain (card points only)\n"
         "  --no-duplicate    play each deal once instead of twice with swapped seats\n"
         "  --seed N          RNG seed (default 1)\n"
         "  --interval S      heartbeat interval in seconds (default 0.5)\n"
-        "  --out FILE        write JSONL to FILE instead of stdout");
+        "  --out FILE        write JSONL to FILE instead of stdout\n"
+        "  --log FILE        append every round (44-byte binary records) for training");
 }
 
 }  // namespace
@@ -180,20 +203,29 @@ int main(int argc, char** argv) {
         else if (a == "--seconds") o.seconds = std::atof(val());
         else if (a == "--threads") o.threads = std::max(1, std::atoi(val()));
         else if (a == "--a" || a == "--b") {
-            AgentKind k;
             const char* v = val();
-            if (!parse_agent(v, k)) { std::fprintf(stderr, "unknown agent %s\n", v); return 2; }
-            (a == "--a" ? o.a : o.b) = k;
+            std::string err;
+            if (!make_agent(v, &err)) { std::fprintf(stderr, "%s\n", err.c_str()); return 2; }
+            (a == "--a" ? o.a : o.b) = v;
+        } else if (a == "--rules") {
+            o.rules_name = val();
+            if (o.rules_name == "swisslos") o.rules = Rules::swisslos();
+            else if (o.rules_name == "plain") o.rules = Rules::plain();
+            else { std::fprintf(stderr, "unknown rules %s\n", o.rules_name.c_str()); return 2; }
         } else if (a == "--no-duplicate") o.duplicate = false;
         else if (a == "--seed") o.seed = std::strtoull(val(), nullptr, 10);
         else if (a == "--interval") o.interval = std::atof(val());
-        else if (a == "--out") {
+        else if (a == "--log") {
+            o.log = std::fopen(val(), "ab");
+            if (!o.log) { std::perror("--log"); return 2; }
+        } else if (a == "--out") {
             o.out = std::fopen(val(), "w");
             if (!o.out) { std::perror("--out"); return 2; }
         } else if (a == "-h" || a == "--help") { usage(); return 0; }
         else { std::fprintf(stderr, "unknown option %s\n", a.c_str()); usage(); return 2; }
     }
 
+    if (o.a.rfind("pimc", 0) == 0 || o.b.rfind("pimc", 0) == 0) o.batch = 1;
     std::vector<Stats> stats(static_cast<size_t>(o.threads));
     std::vector<std::thread> pool;
     const auto t0 = Clock::now();
@@ -229,5 +261,6 @@ int main(int argc, char** argv) {
     const double secs = elapsed();
     emit(o, "summary", secs, t.rounds / secs, t, per);
     if (o.out != stdout) std::fclose(o.out);
+    if (o.log) std::fclose(o.log);
     return 0;
 }

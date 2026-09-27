@@ -1,0 +1,17 @@
+# Beispielrunde (vom Netz gespielt) - so sieht eine Aufzeichnung aus
+players: Dario Anna Beat Chris
+me: Dario
+dealer: Dario
+trump: Eichel
+pushed: yes
+rules: swisslos
+tricks:
+  Anna: EiA  Beat: Ei6  Chris: Ei8  Dario: Ei9
+  Dario: Ro6  Anna: RoA  Beat: Ro7  Chris: RoK
+  Anna: Ei7  Beat: Schi9  Chris: EiK  Dario: EiO
+  Chris: Schi6  Dario: SchiB  Anna: SchiA  Beat: EiU
+  Beat: RoO  Chris: Sche7  Dario: RoB  Anna: Ro8
+  Beat: ScheA  Chris: EiB  Dario: Sche8  Anna: ScheB
+  Chris: SchiK  Dario: Schi8  Anna: SchiO  Beat: Sche6
+  Chris: Schi7  Dario: SchiU  Anna: Ro9  Beat: ScheK
+  Dario: RoU  Anna: Sche9  Beat: ScheO  Chris: ScheU

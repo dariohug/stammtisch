@@ -73,3 +73,17 @@ def test_swisslos_logs_replay_cleanly():
     status, _ = engine.replay_check(d)
     assert len(status) > 1_000_000
     assert (status == 0).all(), np.bincount(status)
+
+
+def test_jasskit_adapter_plays_valid_games():
+    """Our agent inside jass-kit's own arena: every move is validated by jass-kit."""
+    import logging
+    from jass.agents.agent_random_schieber import AgentRandomSchieber
+    from jass.arena.arena import Arena
+    from stammtisch.jasskit_agent import StammtischAgent
+    logging.disable(logging.WARNING)
+    arena = Arena(nr_games_to_play=40, print_every_x_games=10**9, check_move_validity=True)
+    arena.set_players(StammtischAgent("heuristic"), AgentRandomSchieber(), StammtischAgent("heuristic"),
+                      AgentRandomSchieber())
+    arena.play_all_games()
+    assert arena.points_team_0.mean() > arena.points_team_1.mean()

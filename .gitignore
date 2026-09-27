@@ -9,3 +9,5 @@ data/processed/
 runs/
 docs/*.log
 docs/*.aux
+models/
+build-dev/
